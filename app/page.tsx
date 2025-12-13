@@ -1,58 +1,51 @@
-import { DeployButton } from "@/components/deploy-button";
-import { EnvVarWarning } from "@/components/env-var-warning";
-import { AuthButton } from "@/components/auth-button";
-import { Hero } from "@/components/hero";
-import { ThemeSwitcher } from "@/components/theme-switcher";
-import { ConnectSupabaseSteps } from "@/components/tutorial/connect-supabase-steps";
-import { SignUpUserSteps } from "@/components/tutorial/sign-up-user-steps";
-import { hasEnvVars } from "@/lib/utils";
-import Link from "next/link";
-import { Suspense } from "react";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 
 export default function Home() {
   return (
-    <main className="min-h-screen flex flex-col items-center">
-      <div className="flex-1 w-full flex flex-col gap-20 items-center">
-        <nav className="w-full flex justify-center border-b border-b-foreground/10 h-16">
-          <div className="w-full max-w-5xl flex justify-between items-center p-3 px-5 text-sm">
-            <div className="flex gap-5 items-center font-semibold">
-              <Link href={"/"}>Next.js Supabase Starter</Link>
-              <div className="flex items-center gap-2">
-                <DeployButton />
-              </div>
-            </div>
-            {!hasEnvVars ? (
-              <EnvVarWarning />
-            ) : (
-              <Suspense>
-                <AuthButton />
-              </Suspense>
-            )}
-          </div>
-        </nav>
-        <div className="flex-1 flex flex-col gap-20 max-w-5xl p-5">
-          <Hero />
-          <main className="flex-1 flex flex-col gap-6 px-4">
-            <h2 className="font-medium text-xl mb-4">Next steps</h2>
-            {hasEnvVars ? <SignUpUserSteps /> : <ConnectSupabaseSteps />}
-          </main>
-        </div>
-
-        <footer className="w-full flex items-center justify-center border-t mx-auto text-center text-xs gap-8 py-16">
-          <p>
-            Powered by{" "}
-            <a
-              href="https://supabase.com/?utm_source=create-next-app&utm_medium=template&utm_term=nextjs"
-              target="_blank"
-              className="font-bold hover:underline"
-              rel="noreferrer"
-            >
-              Supabase
-            </a>
-          </p>
-          <ThemeSwitcher />
-        </footer>
+    <main className="min-h-screen bg-black text-white">
+      {/* subtle ESPN-ish backdrop */}
+      <div className="pointer-events-none fixed inset-0 -z-10">
+        <div className="absolute inset-0 bg-[radial-gradient(70%_60%_at_50%_10%,rgba(239,68,68,0.16),transparent_60%)]" />
+        <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(255,255,255,0.06)_1px,transparent_1px)] bg-[length:100%_44px] opacity-[0.14]" />
+        <div className="absolute inset-0 bg-[radial-gradient(50%_50%_at_50%_100%,rgba(239,68,68,0.10),transparent_55%)]" />
       </div>
+
+      <section className="mx-auto flex min-h-screen w-full max-w-3xl flex-col justify-center px-5 py-14">
+        <div className="mb-6 h-px w-16 bg-red-600/80 shadow-[0_0_24px_rgba(239,68,68,0.55)]" />
+
+        <h1 className="text-balance text-4xl font-semibold leading-[1.05] tracking-tight md:text-6xl">
+          30<span className="text-red-500">for</span>30 Trailer Generator
+        </h1>
+
+        <p className="mt-4 max-w-2xl text-pretty text-sm leading-6 text-white/70 md:text-base">
+          Input a simple prompt and get a full ESPN 30 for 30 style trailer.
+        </p>
+
+        <form className="mt-10">
+          <div className="group relative">
+            <div className="pointer-events-none absolute -inset-0.5 rounded-full bg-gradient-to-r from-red-600/0 via-red-600/35 to-red-600/0 opacity-70 blur-sm transition-opacity group-focus-within:opacity-100" />
+            <div className="relative flex items-center gap-2 rounded-full border border-white/10 bg-zinc-950/70 px-3 py-2 shadow-[0_20px_80px_-40px_rgba(239,68,68,0.45)] backdrop-blur">
+              <Input
+                name="prompt"
+                autoComplete="off"
+                placeholder="input a simple prompt and get a full espn 30 for 30 style trailer"
+                className="h-12 rounded-full border-0 bg-transparent px-4 text-base text-white placeholder:text-white/35 shadow-none focus-visible:ring-0"
+              />
+              <Button
+                type="button"
+                className="h-12 rounded-full bg-red-600 px-6 text-sm font-semibold text-white shadow-sm hover:bg-red-500 focus-visible:ring-2 focus-visible:ring-red-500/50"
+              >
+                Generate
+              </Button>
+            </div>
+          </div>
+
+          <p className="mt-5 text-xs text-white/45">
+            Keep it short. One sentence is enough.
+          </p>
+        </form>
+      </section>
     </main>
   );
 }
