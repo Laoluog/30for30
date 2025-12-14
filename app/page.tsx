@@ -1,5 +1,4 @@
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { RotatingPromptInput } from "@/components/rotating-prompt-input";
 
 export default function Home() {
   return (
@@ -22,29 +21,7 @@ export default function Home() {
           Input a simple prompt and get a full ESPN 30 for 30 style trailer.
         </p>
 
-        <form className="mt-10">
-          <div className="group relative">
-            <div className="pointer-events-none absolute -inset-0.5 rounded-full bg-gradient-to-r from-red-600/0 via-red-600/35 to-red-600/0 opacity-70 blur-sm transition-opacity group-focus-within:opacity-100" />
-            <div className="relative flex items-center gap-2 rounded-full border border-white/10 bg-zinc-950/70 px-3 py-2 shadow-[0_20px_80px_-40px_rgba(239,68,68,0.45)] backdrop-blur">
-              <Input
-                name="prompt"
-                autoComplete="off"
-                placeholder="input a simple prompt and get a full espn 30 for 30 style trailer"
-                className="h-12 rounded-full border-0 bg-transparent px-4 text-base text-white placeholder:text-white/35 shadow-none focus-visible:ring-0"
-              />
-              <Button
-                type="button"
-                className="h-12 rounded-full bg-red-600 px-6 text-sm font-semibold text-white shadow-sm hover:bg-red-500 focus-visible:ring-2 focus-visible:ring-red-500/50"
-              >
-                Generate
-              </Button>
-            </div>
-          </div>
-
-          <p className="mt-5 text-xs text-white/45">
-            Keep it short. One sentence is enough.
-          </p>
-        </form>
+        <RotatingPromptInput />
       </section>
     </main>
   );
