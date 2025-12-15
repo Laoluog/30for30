@@ -67,7 +67,7 @@ export function RotatingPromptInput() {
         process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "") ??
         "http://127.0.0.1:5000";
 
-      const res = await fetch(`${baseUrl}/create_script`, {
+      const res = await fetch(`${baseUrl}/generate_video`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
