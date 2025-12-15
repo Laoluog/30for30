@@ -61,7 +61,25 @@ def generate_video():
         print(script_text)
         script = _parse_llm_json(script_text)
         shots_plan = plan_shots(script)
-        return jsonify({"script": script, "shots": shots_plan})
+        # Always resolve (one click should produce the full resolved payload).
+        shots = [
+            Shot(
+                shot_id=str(s.get("shot_id") or ""),
+                source=str(s.get("source") or "real_clip"),
+                semantic_intent=str(s.get("semantic_intent") or ""),
+                visual_description=str(s.get("visual_description") or ""),
+                estimated_duration_seconds=float(s.get("estimated_duration_seconds") or 0.0),
+                clip_type=(s.get("clip_type") if isinstance(s.get("clip_type"), str) else None),
+                text_overlay=s.get("text_overlay"),
+                voiceover_hint=s.get("voiceover_hint"),
+            )
+            for s in shots_plan
+            if isinstance(s, dict)
+        ]
+        resolved = run_async(resolve_shots_async(shots))
+        return jsonify(
+            {"script": script, "shots": shots_plan, "resolved": [r.to_dict() for r in resolved]}
+        )
     except ValueError as e:
         return jsonify({"error": str(e), "raw_script": script_text}), 502
     except Exception as e:
