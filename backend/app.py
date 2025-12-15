@@ -1,17 +1,295 @@
 import json
+import math
 import os
+import asyncio
+import uuid
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from google import genai
+from google.genai import types
+from supabase import create_client, Client
 
 from prompt import build_prompt
 from reference_scripts import reference_scripts
-from resolver import Shot, resolve_shots_async, run_async
 
 load_dotenv()
 
 app = Flask(__name__)
+
+_supabase_client: Optional[Client] = None
+_gemini_client: Optional[genai.Client] = None
+
+
+def _get_supabase_client() -> Client:
+    """
+    Lazily create the Supabase client so the server can boot even if env vars are missing.
+    We'll fail with a clear error only if/when we actually try to resolve NBA highlights.
+    """
+    global _supabase_client
+    if _supabase_client is not None:
+        return _supabase_client
+
+    supabase_url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+    supabase_key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY")
+        or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    )
+    if not supabase_url or not supabase_key:
+        raise RuntimeError(
+            "Missing Supabase env vars. Set SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and "
+            "SUPABASE_SERVICE_ROLE_KEY (or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY)."
+        )
+
+    _supabase_client = create_client(supabase_url, supabase_key)
+    return _supabase_client
+
+
+def _get_gemini_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Server missing GEMINI_API_KEY")
+
+    _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
+
+
+@dataclass(frozen=True)
+class Shot:
+    """
+    A single planned shot coming from the shot planner.
+
+    source values expected by the resolver:
+      - "generate_*"   -> generator (e.g. generate_interview, generate_image)
+      - "nba_highlight"-> NBA highlights database
+      - "real_clip"    -> generic clips database (day-to-day / b-roll)
+    """
+
+    shot_id: str
+    source: str
+    semantic_intent: str
+    visual_description: str
+    player_name: Optional[str] = None
+    estimated_duration_seconds: float = 0.0
+    clip_type: Optional[str] = None
+    text_overlay: Any = None
+    voiceover_hint: Any = None
+
+
+@dataclass(frozen=True)
+class ResolvedSegment:
+    shot_id: str
+    source: str
+    status: str  # "ok" | "error"
+    asset_url: Optional[str] = None
+    local_video_path: Optional[str] = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "shot_id": self.shot_id,
+            "source": self.source,
+            "status": self.status,
+            "asset_url": self.asset_url,
+            "local_video_path": self.local_video_path,
+            "error": self.error,
+        }
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+class NbaHighlightsDB:
+    async def find_best_match(self, shot: Shot) -> Optional[str]:
+        if not (shot.player_name or "").strip():
+            return None
+
+        table = os.getenv("HIGHLIGHTS_TABLE", "Highlights")
+        player_col = os.getenv("HIGHLIGHTS_PLAYER_COL", "player_name")
+        length_col = os.getenv("HIGHLIGHTS_LENGTH_COL", "length")
+        embed_col = os.getenv("HIGHLIGHTS_EMBED_COL", "embeddings")
+        asset_col = os.getenv("HIGHLIGHTS_ASSET_COL", "asset_url")
+
+        min_length = float(shot.estimated_duration_seconds or 0) - 1
+        max_length = float(shot.estimated_duration_seconds or 0) + 1
+
+        supabase = _get_supabase_client()
+
+        # 1) Fetch candidate highlights
+        res = (
+            supabase.table(table)
+            .select(f"{asset_col},{embed_col}")
+            .eq(player_col, shot.player_name)
+            .gt(length_col, min_length)
+            .lt(length_col, max_length)
+            .execute()
+        )
+
+        rows = getattr(res, "data", None) or []
+        if not rows:
+            return None
+
+        # 2) Embed the query
+        gemini_client = _get_gemini_client()
+        q = f"{shot.semantic_intent} {shot.visual_description}".strip()
+        emb_result = gemini_client.models.embed_content(
+            model=os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
+            contents=q,
+            config=types.EmbedContentConfig(output_dimensionality=1536),
+        )
+        embeddings = getattr(emb_result, "embeddings", None) or []
+        if not embeddings:
+            return None
+        [embedding_obj] = embeddings
+        query_vector = list(embedding_obj.values)
+
+        # 3) Find best match
+        best_score = -1.0
+        best_asset_url: Optional[str] = None
+        for row in rows:
+            highlight_vector = row.get(embed_col)
+            if not highlight_vector:
+                continue
+            score = cosine_similarity(query_vector, highlight_vector)
+            if score > best_score:
+                best_score = score
+                best_asset_url = row.get(asset_col)
+        return best_asset_url
+
+
+class ClipsDB:
+    async def find_best_match(self, shot: Shot) -> str:
+        # TODO: Replace with real search against your "real day-to-day" clips index.
+        await asyncio.sleep(0)
+        return f"clips://broll/best_match?q={_compact_query(shot)}"
+
+
+class Generator:
+    async def generate(self, shot: Shot) -> str:
+        # TODO: Replace with calls to your generation service (RunPod, Replicate, internal worker, etc).
+        await asyncio.sleep(0)
+        return f"gen://rendered/shot/{shot.shot_id}?q={_compact_query(shot)}"
+
+
+async def resolve_one_shot_async(
+    shot: Shot,
+    *,
+    nba_db: NbaHighlightsDB,
+    clips_db: ClipsDB,
+    generator: Generator,
+) -> ResolvedSegment:
+    src = (shot.source or "").strip().lower()
+    if src == "nba_highlight":
+        asset_url = await nba_db.find_best_match(shot)
+        if not asset_url:
+            return ResolvedSegment(
+                shot_id=shot.shot_id,
+                source=shot.source,
+                status="error",
+                error="No matching NBA highlight found",
+            )
+        return ResolvedSegment(
+            shot_id=shot.shot_id,
+            source=shot.source,
+            status="ok",
+            asset_url=asset_url,
+            local_video_path=None,
+        )
+
+    if src == "real_clip":
+        asset_url = await clips_db.find_best_match(shot)
+        return ResolvedSegment(
+            shot_id=shot.shot_id,
+            source=shot.source,
+            status="ok",
+            asset_url=asset_url,
+            local_video_path=None,
+        )
+
+    asset_url = await generator.generate(shot)
+    return ResolvedSegment(
+        shot_id=shot.shot_id,
+        source=shot.source,
+        status="ok",
+        asset_url=asset_url,
+        local_video_path=None,
+    )
+
+
+async def resolve_shots_async(
+    shots: list[Shot],
+    *,
+    max_concurrency: Optional[int] = None,
+    timeout_seconds: Optional[float] = None,
+) -> list[ResolvedSegment]:
+    nba_db = NbaHighlightsDB()
+    clips_db = ClipsDB()
+    generator = Generator()
+
+    if max_concurrency is None:
+        max_concurrency = int(os.getenv("RESOLVER_MAX_CONCURRENCY", "8"))
+    if timeout_seconds is None:
+        timeout_seconds = float(os.getenv("RESOLVER_TIMEOUT_SECONDS", "30"))
+
+    sem = asyncio.Semaphore(max(1, max_concurrency))
+
+    async def _guarded(shot: Shot) -> ResolvedSegment:
+        async with sem:
+            try:
+                coro = resolve_one_shot_async(
+                    shot, nba_db=nba_db, clips_db=clips_db, generator=generator
+                )
+                return await asyncio.wait_for(coro, timeout=timeout_seconds)
+            except Exception as e:
+                return ResolvedSegment(
+                    shot_id=shot.shot_id,
+                    source=shot.source,
+                    status="error",
+                    error=str(e),
+                )
+
+    tasks = [asyncio.create_task(_guarded(s)) for s in shots]
+    return await asyncio.gather(*tasks)
+
+
+def run_async(coro):
+    """
+    Bridge helper for running async code from sync Flask routes.
+    In normal WSGI Flask usage there is no running event loop, so asyncio.run is safe.
+    """
+    try:
+        asyncio.get_running_loop()
+        raise RuntimeError(
+            "Cannot call run_async() while an event loop is already running. "
+            "If you need async routes end-to-end, run the backend under an ASGI server "
+            "(or migrate to an ASGI framework)."
+        )
+    except RuntimeError as e:
+        if "no running event loop" in str(e).lower():
+            return asyncio.run(coro)
+        raise
+
+
+def _compact_query(shot: Shot) -> str:
+    parts = [
+        (shot.clip_type or "").strip(),
+        (shot.semantic_intent or "").strip(),
+        (shot.visual_description or "").strip(),
+    ]
+    return "+".join([p.replace(" ", "_") for p in parts if p])[:240]
 
 
 @app.after_request
@@ -65,25 +343,18 @@ def generate_video():
         # You can disable this by passing { "resolve": false }.
         resolve_flag = data.get("resolve")
         should_resolve = True if resolve_flag is None else bool(resolve_flag)
-        if should_resolve:
-            shots = [
-                Shot(
-                    shot_id=str(s.get("shot_id") or ""),
-                    source=str(s.get("source") or "real_clip"),
-                    player_name=(s.get("player_name") if isinstance(s.get("player_name"), str) else None),
-                    semantic_intent=str(s.get("semantic_intent") or ""),
-                    visual_description=str(s.get("visual_description") or ""),
-                    estimated_duration_seconds=float(s.get("estimated_duration_seconds") or 0.0),
-                    clip_type=(s.get("clip_type") if isinstance(s.get("clip_type"), str) else None),
-                    text_overlay=s.get("text_overlay"),
-                    voiceover_hint=s.get("voiceover_hint"),
-                )
-                for s in shots_plan
-                if isinstance(s, dict)
-            ]
-            resolved = run_async(resolve_shots_async(shots))
-            return jsonify({"script": script, "shots": shots_plan, "resolved": [r.to_dict() for r in resolved]})
-        return jsonify({"script": script, "shots": shots_plan})
+        if not should_resolve:
+            return jsonify({"script": script, "shots": shots_plan})
+
+        # Resolve immediately after planning shots (same logic as /resolve_shots).
+        resolved = _resolve_shots_from_plan(shots_plan)
+        return jsonify(
+            {
+                "script": script,
+                "shots": shots_plan,
+                "resolved": [r.to_dict() for r in resolved],
+            }
+        )
     except ValueError as e:
         return jsonify({"error": str(e), "raw_script": script_text}), 502
     except Exception as e:
@@ -146,6 +417,27 @@ def plan_shots(script: dict) -> list[dict]:
     return shots
 
 
+def _resolve_shots_from_plan(shots_plan: list[dict]) -> list[ResolvedSegment]:
+    shots: list[Shot] = []
+    for s in shots_plan:
+        if not isinstance(s, dict):
+            continue
+        shots.append(
+            Shot(
+                shot_id=str(s.get("shot_id") or ""),
+                source=str(s.get("source") or "real_clip"),
+                player_name=(s.get("player_name") if isinstance(s.get("player_name"), str) else None),
+                semantic_intent=str(s.get("semantic_intent") or ""),
+                visual_description=str(s.get("visual_description") or ""),
+                estimated_duration_seconds=float(s.get("estimated_duration_seconds") or 0.0),
+                clip_type=(s.get("clip_type") if isinstance(s.get("clip_type"), str) else None),
+                text_overlay=s.get("text_overlay"),
+                voiceover_hint=s.get("voiceover_hint"),
+            )
+        )
+    return run_async(resolve_shots_async(shots))
+
+
 @app.route("/resolve_shots", methods=["POST", "OPTIONS"])
 def resolve_shots():
     """
@@ -162,26 +454,8 @@ def resolve_shots():
     if not isinstance(shots_raw, list) or not shots_raw:
         return jsonify({"error": "Missing required field: shots (non-empty array)"}), 400
 
-    shots: list[Shot] = []
-    for s in shots_raw:
-        if not isinstance(s, dict):
-            continue
-        shots.append(
-            Shot(
-                shot_id=str(s.get("shot_id") or ""),
-                source=str(s.get("source") or "real_clip"),
-                player_name=(s.get("player_name") if isinstance(s.get("player_name"), str) else None),
-                semantic_intent=str(s.get("semantic_intent") or ""),
-                visual_description=str(s.get("visual_description") or ""),
-                estimated_duration_seconds=float(s.get("estimated_duration_seconds") or 0.0),
-                clip_type=(s.get("clip_type") if isinstance(s.get("clip_type"), str) else None),
-                text_overlay=s.get("text_overlay"),
-                voiceover_hint=s.get("voiceover_hint"),
-            )
-        )
-
     try:
-        resolved = run_async(resolve_shots_async(shots))
+        resolved = _resolve_shots_from_plan(shots_raw)
         return jsonify({"resolved": [r.to_dict() for r in resolved]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

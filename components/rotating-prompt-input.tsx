@@ -5,6 +5,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
+type StepStatus = "pending" | "active" | "done" | "error";
+type StepKey = "script" | "shots" | "resolving" | "ready";
+
 const NBA_EXEMPLAR_PROMPTS = [
   "What happens when LeBron’s body says “enough”… but the mission isn’t finished?",
   "Michael Jordan, the second three-peat, and the last dance nobody believed was real.",
@@ -42,7 +45,13 @@ export function RotatingPromptInput() {
   const [idx, setIdx] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [script, setScript] = useState<unknown>(null);
+  const [data, setData] = useState<any>(null);
+  const [steps, setSteps] = useState<Record<StepKey, StepStatus>>({
+    script: "pending",
+    shots: "pending",
+    resolving: "pending",
+    ready: "pending",
+  });
 
   useEffect(() => {
     if (isFocused) return;
@@ -55,23 +64,32 @@ export function RotatingPromptInput() {
     return () => window.clearInterval(id);
   }, [exemplars.length, isFocused, value]);
 
+  function resetSteps() {
+    setSteps({ script: "pending", shots: "pending", resolving: "pending", ready: "pending" });
+  }
+
   async function onSubmit() {
     const prompt = value.trim();
     if (!prompt) return;
 
     setIsSubmitting(true);
     setError(null);
+    setData(null);
+    resetSteps();
+    setSteps((s) => ({ ...s, script: "active" }));
 
     try {
       const baseUrl =
         process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "") ??
         "http://127.0.0.1:5000";
 
+      // Call #1: get the script + planned shots quickly.
       const res = await fetch(`${baseUrl}/generate_video`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt,
+          resolve: false,
         }),
       });
 
@@ -83,15 +101,46 @@ export function RotatingPromptInput() {
       }
 
       const contentType = res.headers.get("content-type") ?? "";
-      const data = contentType.includes("application/json")
+      const genData = contentType.includes("application/json")
         ? await res.json()
         : await res.text();
 
-      setScript(data);
+      setSteps((s) => ({ ...s, script: "done", shots: "done", resolving: "active" }));
+
+      // Call #2: resolve shots.
+      const shots = genData?.shots ?? [];
+      const res2 = await fetch(`${baseUrl}/resolve_shots`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shots }),
+      });
+      if (!res2.ok) {
+        const text = await res2.text().catch(() => "");
+        throw new Error(
+          text ? `Resolver failed (${res2.status}): ${text}` : `Resolver failed (${res2.status})`,
+        );
+      }
+      const ct2 = res2.headers.get("content-type") ?? "";
+      const resolveData = ct2.includes("application/json") ? await res2.json() : await res2.text();
+
+      setData({ ...genData, ...resolveData });
+      setSteps((s) => ({ ...s, resolving: "done", ready: "done" }));
       // Optionally clear input after success:
       // setValue("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Request failed");
+      setSteps((s) => {
+        const next = { ...s };
+        // mark the first non-done step as error
+        (["script", "shots", "resolving", "ready"] as StepKey[]).some((k) => {
+          if (next[k] !== "done") {
+            next[k] = "error";
+            return true;
+          }
+          return false;
+        });
+        return next;
+      });
     } finally {
       setIsSubmitting(false);
     }
@@ -132,12 +181,47 @@ export function RotatingPromptInput() {
         Keep it short. One sentence is enough.
       </p>
 
+      <div className="mt-3 grid gap-1 text-xs">
+        {(
+          [
+            ["script", "Script generated"],
+            ["shots", "Shots planned"],
+            ["resolving", "Shots resolving"],
+            ["ready", "Ready"],
+          ] as const
+        ).map(([key, label]) => {
+          const status = steps[key];
+          const dotClass =
+            status === "done"
+              ? "bg-emerald-500/90"
+              : status === "active"
+                ? "bg-red-500/90 animate-pulse"
+                : status === "error"
+                  ? "bg-red-300/90"
+                  : "bg-white/20";
+          const textClass =
+            status === "done"
+              ? "text-white/70"
+              : status === "active"
+                ? "text-white/80"
+                : status === "error"
+                  ? "text-red-200/90"
+                  : "text-white/40";
+          return (
+            <div key={key} className={`flex items-center gap-2 ${textClass}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />
+              <span>{label}</span>
+            </div>
+          );
+        })}
+      </div>
+
       {error ? (
         <p className="mt-2 text-xs text-red-300/90">{error}</p>
       ) : null}
 
       {/* temporary: keep the response around for debugging / wiring up the next UI step */}
-      {script ? (
+      {data ? (
         <p className="mt-2 text-xs text-white/35">Script received.</p>
       ) : null}
     </form>
