@@ -143,7 +143,6 @@ def plan_shots(script: dict) -> list[dict]:
                 }
             )
             idx += 1
-    print(shots)
     return shots
 
 

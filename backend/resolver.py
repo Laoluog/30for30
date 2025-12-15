@@ -2,6 +2,20 @@ import asyncio
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
+from supabase import create_client, Client
+from dotenv import load_dotenv
+import math
+from google import genai
+from google.genai import types
+
+load_dotenv()
+
+supabase_url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+supabase_key = os.getenv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY")
+gemini_key = os.getenv("GEMINI_API_KEY")
+
+supabase = create_client(supabase_url, supabase_key)
+gemini = genai.Client(api_key=gemini_key)
 
 
 @dataclass(frozen=True)
@@ -17,9 +31,9 @@ class Shot:
 
     shot_id: str
     source: str
-    player_name: Optional[str] = None
     semantic_intent: str
     visual_description: str
+    player_name: Optional[str] = None
     estimated_duration_seconds: float = 0.0
     clip_type: Optional[str] = None
     text_overlay: Any = None
@@ -45,13 +59,66 @@ class ResolvedSegment:
             "error": self.error,
         }
 
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 class NbaHighlightsDB:
-    async def find_best_match(self, shot: Shot) -> str:
-        # TODO: Replace with real vector/text search against your NBA highlights index.
-        await asyncio.sleep(0)
-        q = _compact_query(shot)
-        return f"nba://highlights/best_match?q={q}"
+    async def find_best_match(self, shot: Shot) -> Optional[str]:
+        table = os.getenv("HIGHLIGHTS_TABLE", "Highlights")
+
+        min_length = shot.estimated_duration_seconds - 1
+        max_length = shot.estimated_duration_seconds + 1
+
+        # 1. Fetch candidate highlights
+        res = (
+            supabase
+            .table(table)
+            .select("asset_url, embeddings")
+            .eq("player_name", shot.player_name)
+            .gt("length", min_length)
+            .lt("length", max_length)
+            .execute()
+        )
+
+        if not res.data:
+            print(
+                f"No applicable highlights found for {shot.player_name} "
+                f"between {min_length} and {max_length} seconds"
+            )
+            return None
+
+        # 2. Embed the query
+        query_embedding = gemini.models.embed_content(
+            model="gemini-embedding-001",
+            contents=shot.semantic_intent + " " + shot.visual_description,
+            config=types.EmbedContentConfig(output_dimensionality=1536),
+        )
+
+        [embedding_obj] = query_embedding
+        query_vector = list(embedding_obj.values)
+
+        # 3. Find best match
+        best_score = -1.0
+        best_asset_url = None
+
+        for row in res.data:
+            highlight_vector = row["embeddings"]
+            if not highlight_vector:
+                continue
+
+            score = cosine_similarity(query_vector, highlight_vector)
+
+            if score > best_score:
+                best_score = score
+                best_asset_url = row["asset_url"]
+
+        print(best_asset_url)
+        return best_asset_url
 
 
 class ClipsDB:
