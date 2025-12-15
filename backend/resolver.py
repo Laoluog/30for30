@@ -17,6 +17,7 @@ class Shot:
 
     shot_id: str
     source: str
+    player_name: Optional[str] = None
     semantic_intent: str
     visual_description: str
     estimated_duration_seconds: float = 0.0

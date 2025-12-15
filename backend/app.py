@@ -61,25 +61,29 @@ def generate_video():
         print(script_text)
         script = _parse_llm_json(script_text)
         shots_plan = plan_shots(script)
-        # Always resolve (one click should produce the full resolved payload).
-        shots = [
-            Shot(
-                shot_id=str(s.get("shot_id") or ""),
-                source=str(s.get("source") or "real_clip"),
-                semantic_intent=str(s.get("semantic_intent") or ""),
-                visual_description=str(s.get("visual_description") or ""),
-                estimated_duration_seconds=float(s.get("estimated_duration_seconds") or 0.0),
-                clip_type=(s.get("clip_type") if isinstance(s.get("clip_type"), str) else None),
-                text_overlay=s.get("text_overlay"),
-                voiceover_hint=s.get("voiceover_hint"),
-            )
-            for s in shots_plan
-            if isinstance(s, dict)
-        ]
-        resolved = run_async(resolve_shots_async(shots))
-        return jsonify(
-            {"script": script, "shots": shots_plan, "resolved": [r.to_dict() for r in resolved]}
-        )
+        # Default behavior: one click should do everything in one shot.
+        # You can disable this by passing { "resolve": false }.
+        resolve_flag = data.get("resolve")
+        should_resolve = True if resolve_flag is None else bool(resolve_flag)
+        if should_resolve:
+            shots = [
+                Shot(
+                    shot_id=str(s.get("shot_id") or ""),
+                    source=str(s.get("source") or "real_clip"),
+                    player_name=(s.get("player_name") if isinstance(s.get("player_name"), str) else None),
+                    semantic_intent=str(s.get("semantic_intent") or ""),
+                    visual_description=str(s.get("visual_description") or ""),
+                    estimated_duration_seconds=float(s.get("estimated_duration_seconds") or 0.0),
+                    clip_type=(s.get("clip_type") if isinstance(s.get("clip_type"), str) else None),
+                    text_overlay=s.get("text_overlay"),
+                    voiceover_hint=s.get("voiceover_hint"),
+                )
+                for s in shots_plan
+                if isinstance(s, dict)
+            ]
+            resolved = run_async(resolve_shots_async(shots))
+            return jsonify({"script": script, "shots": shots_plan, "resolved": [r.to_dict() for r in resolved]})
+        return jsonify({"script": script, "shots": shots_plan})
     except ValueError as e:
         return jsonify({"error": str(e), "raw_script": script_text}), 502
     except Exception as e:
@@ -121,11 +125,16 @@ def plan_shots(script: dict) -> list[dict]:
     for act in script.get("acts", []):
         for shot in act.get("shots", []):
             clip_type = shot.get("clip_type")
+            # Prefer per-shot player_name; fall back to trailer-level player_name if present.
+            player_name = shot.get("player_name")
+            if player_name is None:
+                player_name = script.get("player_name")
             shots.append(
                 {
                     "shot_id": str(shot.get("shot_id") or idx),
                     "source": shot_sources.get(clip_type, "real_clip"),
                     "clip_type": clip_type,
+                    "player_name": player_name,
                     "semantic_intent": shot.get("semantic_intent"),
                     "visual_description": shot.get("visual_description"),
                     "text_overlay": shot.get("text_overlay"),
@@ -162,6 +171,7 @@ def resolve_shots():
             Shot(
                 shot_id=str(s.get("shot_id") or ""),
                 source=str(s.get("source") or "real_clip"),
+                player_name=(s.get("player_name") if isinstance(s.get("player_name"), str) else None),
                 semantic_intent=str(s.get("semantic_intent") or ""),
                 visual_description=str(s.get("visual_description") or ""),
                 estimated_duration_seconds=float(s.get("estimated_duration_seconds") or 0.0),

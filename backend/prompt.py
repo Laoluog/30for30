@@ -68,6 +68,7 @@ REQUIRED OUTPUT SCHEMA (MUST MATCH EXACTLY)
   "trailer_title": string,
   "logline": string,
   "total_duration_seconds": number,
+  "player_name": string,
   "acts": [
     {
       "act_name": string,
@@ -76,6 +77,7 @@ REQUIRED OUTPUT SCHEMA (MUST MATCH EXACTLY)
         {
           "shot_id": string,
           "clip_type": "NBA_GAME" | "INTERVIEW" | "TITLE_CARD" | "BLACK_SCREEN" | "BROLL" | "CROWD_REACTION",
+          "player_name": string | null,
           "semantic_intent": string,
           "visual_description": string,
           "text_overlay": string | null,
