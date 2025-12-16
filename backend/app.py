@@ -154,20 +154,39 @@ async def _best_match_from_table(
     shot: "Shot",
     *,
     table: str,
-    player_col: str,
+    player_col: Optional[str] = None,
     length_col: str,
     embed_col: str,
     asset_col: str,
     embedding_dim: int = 1536,
+    length_is_float: bool = False,
+    length_window_seconds: float = 1.0,
+    allowed_lengths: Optional[list[float]] = None,
+    title_col: Optional[str] = None,
+    title_ilike: Optional[str] = None,
+    require_player: bool = False,
 ) -> Optional[str]:
     """
     Shared resolver logic: query candidate rows from Supabase, embed the shot query,
     cosine-rank against stored embeddings, return best asset URL.
     """
-    # Length bounds (coerce to ints because many schemas store `length` as INTEGER).
+    # Length bounds:
+    # - For integer length columns, PostgREST will 400 if we pass decimals.
+    # - For float length columns, keep decimals.
     est = float(shot.estimated_duration_seconds or 0)
-    min_length = max(0, int(math.floor(est - 2)))
-    max_length = max(min_length + 1, int(math.ceil(est + 2)))
+    if allowed_lengths:
+        # Snap to nearest allowed length bucket (useful for auxiliary black screens).
+        target = min(allowed_lengths, key=lambda x: abs(x - est)) if est > 0 else allowed_lengths[0]
+        eps = float(os.getenv("AUXILIARY_LENGTH_EPSILON", "0.05"))
+        min_length = target - eps
+        max_length = target + eps
+    else:
+        if length_is_float:
+            min_length = max(0.0, est - float(length_window_seconds))
+            max_length = max(min_length + 0.01, est + float(length_window_seconds))
+        else:
+            min_length = max(0, int(math.floor(est - float(length_window_seconds))))
+            max_length = max(min_length + 1, int(math.ceil(est + float(length_window_seconds))))
 
     supabase = _get_supabase_client()
 
@@ -178,8 +197,14 @@ async def _best_match_from_table(
             .gte(length_col, min_length)
             .lte(length_col, max_length)
         )
+        if title_col and title_ilike:
+            q = q.ilike(title_col, title_ilike)
+
+        if require_player and not (shot.player_name or "").strip():
+            return q.limit(0).execute()
+
         # Filter by player if we have one (case-insensitive to avoid "Lebron"/"LeBron" mismatch).
-        if (shot.player_name or "").strip():
+        if player_col and (shot.player_name or "").strip():
             q = q.ilike(player_col, " ".join(shot.player_name.split()))
         return q.execute()
 
@@ -189,7 +214,7 @@ async def _best_match_from_table(
         return None
 
     gemini_client = _get_gemini_client()
-    query = f"{shot.semantic_intent} {shot.visual_description}".strip()
+    query = f"{shot.visual_description}".strip()
 
     def _embed():
         return gemini_client.models.embed_content(
@@ -230,6 +255,9 @@ class NbaHighlightsDB:
             length_col=os.getenv("HIGHLIGHTS_LENGTH_COL", "length"),
             embed_col=os.getenv("HIGHLIGHTS_EMBED_COL", "embedding"),
             asset_col=os.getenv("HIGHLIGHTS_ASSET_COL", "url"),
+            length_is_float=False,
+            length_window_seconds=float(os.getenv("HIGHLIGHTS_LENGTH_WINDOW", "1.0")),
+            require_player=True,
         )
 
 
@@ -243,8 +271,49 @@ class ClipsDB:
             length_col=os.getenv("CLIPS_LENGTH_COL", os.getenv("HIGHLIGHTS_LENGTH_COL", "length")),
             embed_col=os.getenv("CLIPS_EMBED_COL", os.getenv("HIGHLIGHTS_EMBED_COL", "embedding")),
             asset_col=os.getenv("CLIPS_ASSET_COL", os.getenv("HIGHLIGHTS_ASSET_COL", "url")),
+            length_is_float=False,
+            length_window_seconds=float(os.getenv("CLIPS_LENGTH_WINDOW", "1.0")),
         )
 
+class AuxiliaryClipsDB:
+    """
+    Auxiliary table for slates / bumpers / black screens.
+    Your schema: title, description, embedding, length (float), url/URL.
+    """
+
+    async def find_best_match(self, shot: Shot) -> Optional[str]:
+        table = os.getenv("AUXILIARY_CLIPS_TABLE", "Auxiliary")
+        title_col = os.getenv("AUXILIARY_CLIPS_TITLE_COL", "Title")
+        length_col = os.getenv("AUXILIARY_CLIPS_LENGTH_COL", "length")
+        embed_col = os.getenv("AUXILIARY_CLIPS_EMBED_COL", "embedding")
+        asset_col = os.getenv("AUXILIARY_CLIPS_ASSET_COL", "url")
+
+        # Black screens: constrain to canonical durations and to rows that look like black screens.
+        if (shot.clip_type or "").upper() == "BLACK_SCREEN":
+            allowed = os.getenv("AUXILIARY_BLACK_LENGTHS", "1,1.5,2,3")
+            allowed_lengths = [float(x.strip()) for x in allowed.split(",") if x.strip()]
+            return await _best_match_from_table(
+                shot,
+                table=table,
+                length_col=length_col,
+                embed_col=embed_col,
+                asset_col=asset_col,
+                length_is_float=True,
+                allowed_lengths=allowed_lengths,
+                title_col=title_col,
+                title_ilike=os.getenv("AUXILIARY_BLACK_TITLE_ILIKE", "Black Screen"),
+            )
+
+        # Title cards / bumpers: float length window, matched by embedding.
+        return await _best_match_from_table(
+            shot,
+            table=table,
+            length_col=length_col,
+            embed_col=embed_col,
+            asset_col=asset_col,
+            length_is_float=True,
+            length_window_seconds=float(shot.estimated_duration_seconds or 0),
+        )
 
 class Generator:
     async def generate(self, shot: Shot) -> str:
@@ -258,6 +327,7 @@ async def resolve_one_shot_async(
     *,
     nba_db: NbaHighlightsDB,
     clips_db: ClipsDB,
+    auxiliary_db: AuxiliaryClipsDB,
     generator: Generator,
 ) -> ResolvedSegment:
     print(f"Resolving shot {shot.shot_id} with source {shot.source}")
@@ -295,7 +365,33 @@ async def resolve_one_shot_async(
             asset_url=asset_url,
             local_video_path=None,
         )
+    if src == "auxiliary_clip":
+        asset_url = await auxiliary_db.find_best_match(shot)
+        if not asset_url:
+            return ResolvedSegment(
+                shot_id=shot.shot_id,
+                source=shot.source,
+                status="error",
+                error="No matching auxiliary clip found",
+            )
+        return ResolvedSegment(
+            shot_id=shot.shot_id,
+            source=shot.source,
+            status="ok",
+            asset_url=asset_url,
+            local_video_path=None,
+        )
+    if src == "generate_interview":
+        asset_url = await generator.generate(shot)
+        return ResolvedSegment(
+            shot_id=shot.shot_id,
+            source=shot.source,
+            status="ok",
+            asset_url=asset_url,
+            local_video_path=None,
+        )
 
+    # Default: treat everything else as generation (e.g. generate_image).
     asset_url = await generator.generate(shot)
     return ResolvedSegment(
         shot_id=shot.shot_id,
@@ -304,6 +400,7 @@ async def resolve_one_shot_async(
         asset_url=asset_url,
         local_video_path=None,
     )
+
 
 
 async def resolve_shots_async(
@@ -315,6 +412,7 @@ async def resolve_shots_async(
     print(f"Resolving {len(shots)} shots")
     nba_db = NbaHighlightsDB()
     clips_db = ClipsDB()
+    auxiliary_db = AuxiliaryClipsDB()
     generator = Generator()
 
     if max_concurrency is None:
@@ -328,7 +426,11 @@ async def resolve_shots_async(
         async with sem:
             try:
                 coro = resolve_one_shot_async(
-                    shot, nba_db=nba_db, clips_db=clips_db, generator=generator
+                    shot,
+                    nba_db=nba_db,
+                    clips_db=clips_db,
+                    auxiliary_db=auxiliary_db,
+                    generator=generator,
                 )
                 return await asyncio.wait_for(coro, timeout=timeout_seconds)
             except Exception as e:
@@ -467,8 +569,8 @@ def plan_shots(script: dict) -> list[dict]:
     shot_sources = {
         "NBA_GAME": "nba_highlight",
         "INTERVIEW": "generate_interview",
-        "TITLE_CARD": "generate_image",
-        "BLACK_SCREEN": "generate_image",
+        "TITLE_CARD": "auxiliary_clip",
+        "BLACK_SCREEN": "auxiliary_clip",
         "BROLL": "real_clip",
         "CROWD_REACTION": "real_clip",
     }

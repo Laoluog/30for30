@@ -31,14 +31,14 @@ def main() -> int:
         )
         return 6
 
-    table = os.getenv("HIGHLIGHTS_TABLE", "Clips")
+    table = os.getenv("HIGHLIGHTS_TABLE", "Auxillary")
     id_col = os.getenv("HIGHLIGHTS_ID_COL", "id")
     desc_col = os.getenv("HIGHLIGHTS_DESC_COL", "Description")
     # Your table uses `embedding` (singular) based on your Supabase REST logs.
     embed_col = os.getenv("HIGHLIGHTS_EMBED_COL", "embedding")
     # Default to embedding rows id 2..15. Override with HIGHLIGHTS_ID_START/HIGHLIGHTS_ID_END if desired.
     id_start = int(os.getenv("HIGHLIGHTS_ID_START", "1"))
-    id_end = int(os.getenv("HIGHLIGHTS_ID_END", "2"))
+    id_end = int(os.getenv("HIGHLIGHTS_ID_END", "3"))
 
     supabase = create_client(supabase_url, supabase_key)
     gemini = genai.Client(api_key=gemini_key)
