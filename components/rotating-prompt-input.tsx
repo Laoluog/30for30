@@ -38,7 +38,13 @@ const NBA_EXEMPLAR_PROMPTS = [
   "Nikola Jokic goes home. The league keeps calling. He doesn’t pick up.",
 ] as const;
 
-export function RotatingPromptInput() {
+export function RotatingPromptInput({
+  selectedAssetUrl,
+  onSelectAssetUrl,
+}: {
+  selectedAssetUrl: string | null;
+  onSelectAssetUrl: (url: string) => void;
+}) {
   const exemplars = useMemo(() => NBA_EXEMPLAR_PROMPTS, []);
   const [value, setValue] = useState("");
   const [isFocused, setIsFocused] = useState(false);
@@ -220,9 +226,136 @@ export function RotatingPromptInput() {
         <p className="mt-2 text-xs text-red-300/90">{error}</p>
       ) : null}
 
-      {/* temporary: keep the response around for debugging / wiring up the next UI step */}
       {data ? (
-        <p className="mt-2 text-xs text-white/35">Script received.</p>
+        <div className="mt-5 rounded-xl border border-white/10 bg-zinc-950/60 p-4 text-xs text-white/80 backdrop-blur">
+          <div className="flex flex-col gap-1">
+            <p className="text-[11px] uppercase tracking-wide text-white/40">Result</p>
+            <p className="text-sm font-semibold text-white">
+              {typeof data?.script?.trailer_title === "string"
+                ? data.script.trailer_title
+                : "Trailer plan"}
+            </p>
+            {typeof data?.script?.logline === "string" ? (
+              <p className="text-white/60">{data.script.logline}</p>
+            ) : null}
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-2 text-[11px] text-white/60 md:grid-cols-4">
+            <div className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5">
+              <span className="text-white/40">Shots</span>
+              <div className="text-white/80">{Array.isArray(data?.shots) ? data.shots.length : "-"}</div>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5">
+              <span className="text-white/40">Resolved</span>
+              <div className="text-white/80">
+                {Array.isArray(data?.resolved) ? data.resolved.length : "-"}
+              </div>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5">
+              <span className="text-white/40">OK</span>
+              <div className="text-white/80">
+                {Array.isArray(data?.resolved)
+                  ? data.resolved.filter((r: any) => r?.status === "ok").length
+                  : "-"}
+              </div>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5">
+              <span className="text-white/40">Errors</span>
+              <div className="text-white/80">
+                {Array.isArray(data?.resolved)
+                  ? data.resolved.filter((r: any) => r?.status !== "ok").length
+                  : "-"}
+              </div>
+            </div>
+          </div>
+
+          <details className="mt-4">
+            <summary className="cursor-pointer select-none text-[11px] text-white/60">
+              Shots + resolved assets
+            </summary>
+            <div className="mt-2 overflow-hidden rounded-lg border border-white/10">
+              <div className="max-h-[380px] overflow-auto">
+                <table className="w-full border-collapse text-[11px]">
+                  <thead className="sticky top-0 bg-zinc-950">
+                    <tr className="text-left text-white/50">
+                      <th className="px-2 py-2">Shot</th>
+                      <th className="px-2 py-2">Type</th>
+                      <th className="px-2 py-2">Source</th>
+                      <th className="px-2 py-2">Status</th>
+                      <th className="px-2 py-2">asset_url / error</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-white/75">
+                    {(Array.isArray(data?.shots) ? data.shots : []).map((s: any, i: number) => {
+                      const shotId = s?.shot_id ?? String(i);
+                      const resolved = Array.isArray(data?.resolved)
+                        ? data.resolved.find((r: any) => r?.shot_id === shotId)
+                        : null;
+                      const status = resolved?.status ?? "-";
+                      const statusClass =
+                        status === "ok"
+                          ? "text-emerald-300/90"
+                          : status === "error"
+                            ? "text-red-300/90"
+                            : "text-white/60";
+                      const detail = resolved?.asset_url ?? resolved?.error ?? "-";
+                      const detailStr = typeof detail === "string" ? detail : JSON.stringify(detail);
+                      const isHttpUrl = typeof detail === "string" && /^https?:\/\//i.test(detail);
+                      return (
+                        <tr key={shotId} className="border-t border-white/10">
+                          <td className="px-2 py-2 font-mono text-white/80">{shotId}</td>
+                          <td className="px-2 py-2">{s?.clip_type ?? "-"}</td>
+                          <td className="px-2 py-2">{s?.source ?? "-"}</td>
+                          <td className={`px-2 py-2 ${statusClass}`}>{status}</td>
+                          <td className="px-2 py-2 font-mono text-[10px] text-white/70">
+                            {isHttpUrl ? (
+                              <a
+                                href={detail}
+                                className="break-all text-white/80 underline decoration-white/20 underline-offset-2 hover:decoration-white/50"
+                                onClick={(e) => {
+                                  // Normal click: load into the local video board (don’t navigate away).
+                                  // Cmd/Ctrl-click: allow opening in a new tab AND also load into the board.
+                                  onSelectAssetUrl(detail);
+                                  if (!(e.metaKey || e.ctrlKey)) e.preventDefault();
+                                }}
+                              >
+                                {detail}
+                              </a>
+                            ) : (
+                              <button
+                                type="button"
+                                className="break-all text-left text-white/70 underline decoration-white/10 underline-offset-2 hover:text-white/85 hover:decoration-white/30"
+                                onClick={() => onSelectAssetUrl(detailStr)}
+                              >
+                                {detailStr}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+
+          <details className="mt-3">
+            <summary className="cursor-pointer select-none text-[11px] text-white/60">
+              Raw JSON
+            </summary>
+            <pre className="mt-2 max-h-[320px] overflow-auto rounded-lg border border-white/10 bg-black/40 p-3 text-[10px] text-white/70">
+              {JSON.stringify(data, null, 2)}
+            </pre>
+          </details>
+
+          <div className="mt-4 rounded-lg border border-white/10 bg-black/30 p-3">
+            <p className="text-[11px] uppercase tracking-wide text-white/40">Selected asset_url</p>
+            <p className="mt-1 break-all font-mono text-[10px] text-white/70">
+              {selectedAssetUrl ?? "—"}
+            </p>
+          </div>
+        </div>
       ) : null}
     </form>
   );

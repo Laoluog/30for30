@@ -5,6 +5,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
+import ast
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -111,70 +112,138 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
         return 0.0
     return dot / (norm_a * norm_b)
 
+def _coerce_embedding(raw: Any) -> Optional[list[float]]:
+    """
+    Coerce an embedding value returned from Supabase into list[float].
+    Supports:
+      - list[float]
+      - JSON string "[0.1, 0.2, ...]"
+      - Python-literal string "[0.1, 0.2, ...]" (via ast.literal_eval)
+      - dict shapes like {"values": [...]} / {"embedding": [...]}
+    """
+    if raw is None:
+        return None
+
+    val = raw
+    if isinstance(val, dict):
+        if isinstance(val.get("values"), list):
+            val = val["values"]
+        elif isinstance(val.get("embedding"), list):
+            val = val["embedding"]
+
+    if isinstance(val, str):
+        # Try JSON first, then Python literal.
+        try:
+            val = json.loads(val)
+        except Exception:
+            try:
+                val = ast.literal_eval(val)
+            except Exception:
+                return None
+
+    if not isinstance(val, list) or not val:
+        return None
+
+    try:
+        return [float(x) for x in val]
+    except Exception:
+        return None
+
+
+async def _best_match_from_table(
+    shot: "Shot",
+    *,
+    table: str,
+    player_col: str,
+    length_col: str,
+    embed_col: str,
+    asset_col: str,
+    embedding_dim: int = 1536,
+) -> Optional[str]:
+    """
+    Shared resolver logic: query candidate rows from Supabase, embed the shot query,
+    cosine-rank against stored embeddings, return best asset URL.
+    """
+    # Length bounds (coerce to ints because many schemas store `length` as INTEGER).
+    est = float(shot.estimated_duration_seconds or 0)
+    min_length = max(0, int(math.floor(est - 2)))
+    max_length = max(min_length + 1, int(math.ceil(est + 2)))
+
+    supabase = _get_supabase_client()
+
+    def _fetch():
+        q = (
+            supabase.table(table)
+            .select(f"{asset_col},{embed_col}")
+            .gte(length_col, min_length)
+            .lte(length_col, max_length)
+        )
+        # Filter by player if we have one (case-insensitive to avoid "Lebron"/"LeBron" mismatch).
+        if (shot.player_name or "").strip():
+            q = q.ilike(player_col, " ".join(shot.player_name.split()))
+        return q.execute()
+
+    res = await asyncio.to_thread(_fetch)
+    rows = getattr(res, "data", None) or []
+    if not rows:
+        return None
+
+    gemini_client = _get_gemini_client()
+    query = f"{shot.semantic_intent} {shot.visual_description}".strip()
+
+    def _embed():
+        return gemini_client.models.embed_content(
+            model=os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
+            contents=query,
+            config=types.EmbedContentConfig(output_dimensionality=embedding_dim),
+        )
+
+    emb_result = await asyncio.to_thread(_embed)
+    embeddings = getattr(emb_result, "embeddings", None) or []
+    if not embeddings:
+        return None
+    [embedding_obj] = embeddings
+    query_vector = [float(x) for x in list(embedding_obj.values)]
+
+    best_score = -1.0
+    best_asset_url: Optional[str] = None
+    for row in rows:
+        vec = _coerce_embedding(row.get(embed_col))
+        if not vec:
+            continue
+        if len(vec) != len(query_vector):
+            continue
+        score = cosine_similarity(query_vector, vec)
+        if score > best_score:
+            best_score = score
+            best_asset_url = row.get(asset_col)
+
+    return best_asset_url
+
 
 class NbaHighlightsDB:
     async def find_best_match(self, shot: Shot) -> Optional[str]:
-        if not (shot.player_name or "").strip():
-            return None
-
-        table = os.getenv("HIGHLIGHTS_TABLE", "Highlights")
-        player_col = os.getenv("HIGHLIGHTS_PLAYER_COL", "player_name")
-        length_col = os.getenv("HIGHLIGHTS_LENGTH_COL", "length")
-        embed_col = os.getenv("HIGHLIGHTS_EMBED_COL", "embeddings")
-        asset_col = os.getenv("HIGHLIGHTS_ASSET_COL", "asset_url")
-
-        min_length = float(shot.estimated_duration_seconds or 0) - 1
-        max_length = float(shot.estimated_duration_seconds or 0) + 1
-
-        supabase = _get_supabase_client()
-
-        # 1) Fetch candidate highlights
-        res = (
-            supabase.table(table)
-            .select(f"{asset_col},{embed_col}")
-            .eq(player_col, shot.player_name)
-            .gt(length_col, min_length)
-            .lt(length_col, max_length)
-            .execute()
+        return await _best_match_from_table(
+            shot,
+            table=os.getenv("HIGHLIGHTS_TABLE", "Highlights"),
+            player_col=os.getenv("HIGHLIGHTS_PLAYER_COL", "Player"),
+            length_col=os.getenv("HIGHLIGHTS_LENGTH_COL", "length"),
+            embed_col=os.getenv("HIGHLIGHTS_EMBED_COL", "embedding"),
+            asset_col=os.getenv("HIGHLIGHTS_ASSET_COL", "url"),
         )
-
-        rows = getattr(res, "data", None) or []
-        if not rows:
-            return None
-
-        # 2) Embed the query
-        gemini_client = _get_gemini_client()
-        q = f"{shot.semantic_intent} {shot.visual_description}".strip()
-        emb_result = gemini_client.models.embed_content(
-            model=os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
-            contents=q,
-            config=types.EmbedContentConfig(output_dimensionality=1536),
-        )
-        embeddings = getattr(emb_result, "embeddings", None) or []
-        if not embeddings:
-            return None
-        [embedding_obj] = embeddings
-        query_vector = list(embedding_obj.values)
-
-        # 3) Find best match
-        best_score = -1.0
-        best_asset_url: Optional[str] = None
-        for row in rows:
-            highlight_vector = row.get(embed_col)
-            if not highlight_vector:
-                continue
-            score = cosine_similarity(query_vector, highlight_vector)
-            if score > best_score:
-                best_score = score
-                best_asset_url = row.get(asset_col)
-        return best_asset_url
 
 
 class ClipsDB:
-    async def find_best_match(self, shot: Shot) -> str:
-        # TODO: Replace with real search against your "real day-to-day" clips index.
-        await asyncio.sleep(0)
-        return f"clips://broll/best_match?q={_compact_query(shot)}"
+    async def find_best_match(self, shot: Shot) -> Optional[str]:
+        # Same structure as Highlights, just a different table name.
+        return await _best_match_from_table(
+            shot,
+            table=os.getenv("CLIPS_TABLE", "Clips"),
+            player_col=os.getenv("CLIPS_PLAYER_COL", os.getenv("HIGHLIGHTS_PLAYER_COL", "Player")),
+            length_col=os.getenv("CLIPS_LENGTH_COL", os.getenv("HIGHLIGHTS_LENGTH_COL", "length")),
+            embed_col=os.getenv("CLIPS_EMBED_COL", os.getenv("HIGHLIGHTS_EMBED_COL", "embedding")),
+            asset_col=os.getenv("CLIPS_ASSET_COL", os.getenv("HIGHLIGHTS_ASSET_COL", "url")),
+        )
 
 
 class Generator:
@@ -191,6 +260,7 @@ async def resolve_one_shot_async(
     clips_db: ClipsDB,
     generator: Generator,
 ) -> ResolvedSegment:
+    print(f"Resolving shot {shot.shot_id} with source {shot.source}")
     src = (shot.source or "").strip().lower()
     if src == "nba_highlight":
         asset_url = await nba_db.find_best_match(shot)
@@ -211,6 +281,13 @@ async def resolve_one_shot_async(
 
     if src == "real_clip":
         asset_url = await clips_db.find_best_match(shot)
+        if not asset_url:
+            return ResolvedSegment(
+                shot_id=shot.shot_id,
+                source=shot.source,
+                status="error",
+                error="No matching clip found",
+            )
         return ResolvedSegment(
             shot_id=shot.shot_id,
             source=shot.source,
@@ -235,6 +312,7 @@ async def resolve_shots_async(
     max_concurrency: Optional[int] = None,
     timeout_seconds: Optional[float] = None,
 ) -> list[ResolvedSegment]:
+    print(f"Resolving {len(shots)} shots")
     nba_db = NbaHighlightsDB()
     clips_db = ClipsDB()
     generator = Generator()
@@ -348,6 +426,7 @@ def generate_video():
 
         # Resolve immediately after planning shots (same logic as /resolve_shots).
         resolved = _resolve_shots_from_plan(shots_plan)
+        
         return jsonify(
             {
                 "script": script,
@@ -449,6 +528,7 @@ def resolve_shots():
     if request.method == "OPTIONS":
         return ("", 204)
 
+    print("Resolving shots")
     data = request.get_json(silent=True) or {}
     shots_raw = data.get("shots") or []
     if not isinstance(shots_raw, list) or not shots_raw:
