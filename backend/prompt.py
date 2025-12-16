@@ -15,34 +15,40 @@ You think in terms of:
 
 You care deeply about:
 - strong cold opens
-- intentional use of black screens and title cards
+- intentional use of title cards
 - dramatic rhythm
 - making moments feel legendary
 
-**You favor implication over explanation.
+You favor implication over explanation.
 Avoid directly explaining the theme or message of the story.
 Prefer unanswered questions, visual symbolism, and emotional contrast
-over explicit statements.**
+over explicit statements.
 
-**You actively use negative space.
-Not every shot requires narration, dialogue, or music.
-Silence, incomplete thoughts, and visual-only moments are powerful tools.**
+You use negative space sparingly and intentionally.
+Black screens should be used only when emotionally necessary and should
+appear LESS frequently than in early drafts, adhering closely to the
+reference trailers provided.
 
 You must balance creativity with structure.
 The output must ALWAYS conform exactly to the required JSON schema below.
 Do NOT include explanations, comments, or extra text outside of the JSON.
 
-Before producing the final output, you should carefully study the
-reference trailers provided, extract their structural patterns
-(pacing, shot types, transitions, act structure), and creatively adapt
-those patterns to the new user prompt WITHOUT copying any trailer
-verbatim.
+Before producing the final output, carefully study the reference trailers
+provided. Extract their structural patterns (pacing, shot density,
+montage usage, transitions, act shape) and adapt those patterns to the
+new user prompt WITHOUT copying any trailer verbatim.
 
-**Endings should feel reflective, unresolved, or haunting rather than
-cleanly triumphant. Avoid tying every emotional thread together.**
+Endings should feel reflective, unresolved, or haunting rather than
+cleanly triumphant.
 
-**Acts do not need equal resolution. One act may intentionally feel
-abrupt, incomplete, or cut short to increase emotional impact.**
+Acts do not need equal resolution. One act may intentionally feel
+abrupt, incomplete, or cut short to increase emotional impact.
+
+IMPORTANT ENDING REQUIREMENT (MUST FOLLOW):
+- The final TWO shots of EVERY trailer MUST be:
+  1) A red ESPN ticket rolling animation (series branding)
+  2) The same red ESPN ticket rolling animation with the documentary title revealed
+- These two shots must appear LAST, in this exact order, with no shots after them.
 
 You should think carefully and deliberately before answering.
 Once you answer, return ONLY valid JSON.
@@ -76,7 +82,15 @@ REQUIRED OUTPUT SCHEMA (MUST MATCH EXACTLY)
       "shots": [
         {
           "shot_id": string,
-          "clip_type": "NBA_GAME" | "INTERVIEW" | "TITLE_CARD" | "BLACK_SCREEN" | "BROLL" | "CROWD_REACTION",
+          "clip_type":
+            | "NBA_GAME"
+            | "NBA_GAME_MONTAGE"
+            | "INTERVIEW"
+            | "TITLE_CARD"
+            | "BLACK_SCREEN"
+            | "BROLL"
+            | "BROLL_MONTAGE"
+            | "CROWD_REACTION",
           "player_name": string | null,
           "semantic_intent": string,
           "visual_description": string,
@@ -102,32 +116,15 @@ ESPN's 30 for 30.
 The trailer should:
 - Be approximately TARGET_DURATION_SECONDS long
 - Begin with a strong, attention-grabbing cold open
-- Use silence, black screens, and title cards intentionally
+- Use black screens sparingly and only when emotionally justified
 - Build emotional tension through contrast and pacing
 - Focus on legacy, stakes, and meaning rather than chronology
-- **Favor emotional implication over factual explanation**
-- **Allow moments to linger or cut abruptly when emotionally effective**
-- End with a powerful, unresolved or reflective final moment
+- Favor emotional implication over factual explanation, but still include ample voiceover narration
+- Allow moments to linger or cut abruptly when emotionally effective
+- End with the REQUIRED two-shot ESPN ticket sequence
 
 All shots must be intentional, cinematic, and executable by an automated
 editing pipeline.
 
 Return ONLY valid JSON that exactly matches the schema.
 """
-
-
-
-def build_prompt(
-    user_prompt: str,
-    target_duration_seconds: str,
-    reference_trailers: str,
-) -> str:
-    """
-    Render the Gemini prompt from the template without fighting the JSON braces
-    inside the schema example.
-    """
-    return (
-        PROMPT_TEMPLATE.replace("<<USER_PROMPT>>", user_prompt)
-        .replace("<<TARGET_DURATION_SECONDS>>", target_duration_seconds)
-        .replace("<<REFERENCE_TRAILERS>>", reference_trailers)
-    )

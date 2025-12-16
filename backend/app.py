@@ -160,7 +160,7 @@ async def _best_match_from_table(
     asset_col: str,
     embedding_dim: int = 1536,
     length_is_float: bool = False,
-    length_window_seconds: float = 1.0,
+    length_window_seconds: float = 1.5,
     allowed_lengths: Optional[list[float]] = None,
     title_col: Optional[str] = None,
     title_ilike: Optional[str] = None,
@@ -232,7 +232,9 @@ async def _best_match_from_table(
 
     best_score = -1.0
     best_asset_url: Optional[str] = None
+    any_candidate = False
     for row in rows:
+        any_candidate = True
         vec = _coerce_embedding(row.get(embed_col))
         if not vec:
             continue
@@ -242,6 +244,14 @@ async def _best_match_from_table(
         if score > best_score:
             best_score = score
             best_asset_url = row.get(asset_col)
+
+    # Fallback: if we fetched rows but couldn't score (e.g. embeddings missing/null),
+    # return the first candidate's asset URL. This is especially helpful for BLACK_SCREEN
+    # where the content is interchangeable but duration matters.
+    if best_asset_url is None and any_candidate:
+        first = rows[0] if rows else {}
+        if isinstance(first, dict):
+            return first.get(asset_col) or first.get(str(asset_col).lower()) or first.get("url") or first.get("URL")
 
     return best_asset_url
 
@@ -292,6 +302,8 @@ class AuxiliaryClipsDB:
         if (shot.clip_type or "").upper() == "BLACK_SCREEN":
             allowed = os.getenv("AUXILIARY_BLACK_LENGTHS", "1,1.5,2,3")
             allowed_lengths = [float(x.strip()) for x in allowed.split(",") if x.strip()]
+            # Prefer substring matching to tolerate titles like "Black Screen 1s".
+            title_pattern = os.getenv("AUXILIARY_BLACK_TITLE_ILIKE", "%Black Screen%")
             return await _best_match_from_table(
                 shot,
                 table=table,
@@ -301,7 +313,7 @@ class AuxiliaryClipsDB:
                 length_is_float=True,
                 allowed_lengths=allowed_lengths,
                 title_col=title_col,
-                title_ilike=os.getenv("AUXILIARY_BLACK_TITLE_ILIKE", "Black Screen"),
+                title_ilike=title_pattern,
             )
 
         # Title cards / bumpers: float length window, matched by embedding.
